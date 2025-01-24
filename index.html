@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket Client with Video</title>
+    <link rel="stylesheet"
+          href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.1/font/bootstrap-icons.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .data-box {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+
+        .status {
+            padding: 5px 10px;
+            margin: 5px 0;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .telemetry-value {
+            font-family: monospace;
+            font-size: 1.1em;
+            color: #0066cc;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        .video-stream {
+            width: 100%;
+            border-radius: 5px;
+            background-color: #000;
+        }
+
+        .video-controls {
+            margin: 10px 0;
+            display: flex;
+            gap: 10px;
+        }
+
+        .control-btn {
+            padding: 8px 16px;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 1rem;
+            background-color: #007bff;
+            color: white;
+        }
+
+        .control-btn:hover {
+            background-color: #0056b3;
+        }
+
+        .control-btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .recording-indicator {
+            display: none;
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: red;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+            100% {
+                opacity: 1;
+            }
+        }
+
+        .camera-error {
+            padding: 20px;
+            text-align: center;
+            background-color: #f8d7da;
+            color: #721c24;
+            border-radius: 5px;
+            margin: 10px 0;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<h1>ALSTOM </h1>
+
+<div class="data-box">
+    <h2><i class="bi bi-camera-video"></i> Video Feed</h2>
+    <div class="video-container">
+        <video id="videoStream" class="video-stream" autoplay playsinline controls></video>
+        <div id="recordingIndicator" class="recording-indicator"></div>
+    </div>
+    <div id="videoError" class="camera-error">
+        <i class="bi bi-exclamation-triangle"></i> <span id="errorMessage">Video error occurred.</span>
+    </div>
+    <div class="video-controls">
+        <button id="captureBtn" class="control-btn" disabled>
+            <i class="bi bi-camera"></i> Capture Image
+        </button>
+        <button id="recordBtn" class="control-btn" disabled>
+            <i class="bi bi-record-circle"></i> Start Recording
+        </button>
+    </div>
+</div>
+
+<div class="data-box">
+    <h2><i class="bi bi-keyboard"></i> UX Commands Status</h2>
+    <div id="ux-status" class="status disconnected">
+        <i class="bi bi-x-circle-fill"></i> Disconnected
+    </div>
+    <div id="last-command"></div>
+</div>
+
+<div class="data-box">
+    <h2><i class="bi bi-graph-up"></i> Telemetry Data</h2>
+    <div id="telemetry-status" class="status disconnected">
+        <i class="bi bi-x-circle-fill"></i> Disconnected
+    </div>
+    <div id="telemetry-data"></div>
+</div>
+
+<script>
+  // Configuration object - You can select to use Local camera or distant WebRTC server
+  const CONFIG = {
+    useLocalCamera: false,      // Set to false to disable local camera
+    useStreamingServer: true, // Set to true to enable streaming server
+    //streamingServerUrl: 'ws://your-webrtc-server:port',
+    //streamingServerUrl: 'http://127.0.0.1:8080',
+    streamingServerUrl: 'ws://192.168.1.108:8889',
+
+    preferredResolution: {
+      width: {ideal: 1280},
+      height: {ideal: 720}
+    }
+  };
+
+  let mediaRecorder;
+  let recordedChunks = [];
+  let isRecording = false;
+
+  /**
+   * Initialize video source based on configuration
+   */
+  async function initializeVideoSource() {
+    let stream = null;
+
+    if (CONFIG.useLocalCamera) {
+      stream = await initializeLocalCamera();
+    }
+
+    if (!stream && CONFIG.useStreamingServer) {
+      stream = await initializeStreamingServer();
+    }
+
+    if (stream) {
+      setupVideoControls(stream);
+    }
+  }
+
+  /**
+   * Initialize local camera (Laptop webcam)
+   */
+  async function initializeLocalCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: CONFIG.preferredResolution,
+        audio: true
+      });
+
+      const videoElement = document.getElementById('videoStream');
+      videoElement.srcObject = stream;
+
+      enableVideoControls();
+      hideError();
+
+      return stream;
+    } catch (error) {
+      console.error('Error accessing local camera:', error);
+      showError('Could not access local camera. Please check permissions.');
+      return null;
+    }
+  }
+
+  /**
+   * Initialize streaming server connection
+   */
+  async function initializeStreamingServer() {
+    try {
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          {urls: "stun:stun.l.google.com:19302"}
+        ]
+      });
+      const ws = new WebSocket(CONFIG.streamingServerUrl);
+
+      // Add logging for ice candidates
+      pc.onicecandidate = (event) => {
+        console.log("ICE candidate:", event.candidate);
+      };
+
+      // Add video transceiver in recvonly mode
+      pc.addTransceiver("video", {direction: "recvonly"});
+      console.log("Added video transceiver");
+      pc.addTransceiver("audio", {direction: "recvonly"});
+      console.log("Added audio transceiver");
+
+      return new Promise((resolve, reject) => {
+        ws.onopen = async () => {
+          console.log('WebSocket connected, creating offer...');
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            console.log("Local description set, sending offer:", offer);
+            ws.send(JSON.stringify({
+              type: offer.type,
+              sdp: offer.sdp
+            }));
+          } catch (error) {
+            console.error('Error creating offer:', error);
+            reject(error);
+          }
+        };
+
+        ws.onmessage = async (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            console.log("Received message from server:", message);
+
+            if (message.type === "answer") {
+              console.log("Setting remote description");
+              await pc.setRemoteDescription(new RTCSessionDescription(message));
+              console.log("Remote description set successfully");
+            }
+          } catch (error) {
+            console.error('Error handling server message:', error);
+            reject(error);
+          }
+        };
+
+        pc.ontrack = (event) => {
+          console.log('Track received:', event.track.kind);
+          const videoElement = document.getElementById('videoStream');
+          videoElement.srcObject = event.streams[0];
+          videoElement.onloadedmetadata = () => {
+            console.log("Video metadata loaded");
+            enableVideoControls();
+            hideError();
+            resolve(event.streams[0]);
+            videoElement.play();
+          };
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          console.log('ICE connection state:', pc.iceConnectionState);
+          if (pc.iceConnectionState === 'failed') {
+            console.error('ICE connection failed');
+            showError('WebRTC connection failed');
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          console.log('Connection state:', pc.connectionState);
+          if (pc.connectionState === 'failed') {
+            showError('WebRTC connection failed');
+            reject(new Error('WebRTC connection failed'));
+          }
+        };
+
+        ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          showError('WebSocket connection error');
+          reject(error);
+        };
+
+        ws.onclose = () => {
+          console.log('WebSocket closed');
+          showError('WebSocket connection closed');
+          reject(new Error('WebSocket closed'));
+        };
+
+        // Extend timeout and add more details
+        setTimeout(() => {
+          if (!document.getElementById('videoStream').srcObject) {
+            console.error('Connection timeout - Debug info:', {
+              iceConnectionState: pc.iceConnectionState,
+              connectionState: pc.connectionState,
+              signalingState: pc.signalingState
+            });
+            reject(new Error('Connection timeout'));
+          }
+        }, 15000);  // Extended to 15 seconds
+      });
+    } catch (error) {
+      console.error('Error initializing streaming server:', error);
+      showError('Failed to connect to streaming server');
+      return null;
+    }
+  }
+
+  function enableVideoControls() {
+    document.getElementById('captureBtn').disabled = false;
+    document.getElementById('recordBtn').disabled = false;
+  }
+
+  function showError(message) {
+    const errorDiv = document.getElementById('videoError');
+    document.getElementById('errorMessage').textContent = message;
+    errorDiv.style.display = 'block';
+  }
+
+  function hideError() {
+    document.getElementById('videoError').style.display = 'none';
+  }
+
+  function startRecording(stream) {
+    recordedChunks = [];
+    const options = {mimeType: 'video/webm;codecs=vp9,opus'};
+    try {
+      mediaRecorder = new MediaRecorder(stream, options);
+    } catch (e) {
+      console.error('MediaRecorder error:', e);
+      mediaRecorder = new MediaRecorder(stream, {mimeType: 'video/webm'});
+    }
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordedChunks.push(event.data);
+      }
+    };
+
+    mediaRecorder.start();
+  }
+
+  function stopRecording() {
+    mediaRecorder.stop();
+    mediaRecorder.onstop = () => {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `video_${timestamp}.webm`;
+
+      const blob = new Blob(recordedChunks, {type: 'video/webm'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+  }
+
+  function captureImage() {
+    const videoElement = document.getElementById('videoStream');
+    const canvas = document.createElement('canvas');
+    canvas.width = videoElement.videoWidth;
+    canvas.height = videoElement.videoHeight;
+    canvas.getContext('2d').drawImage(videoElement, 0, 0);
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `capture_${timestamp}.png`;
+
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  }
+
+  function setupVideoControls(stream) {
+    const captureBtn = document.getElementById('captureBtn');
+    const recordBtn = document.getElementById('recordBtn');
+    const videoElement = document.getElementById('videoStream');
+    const recordingIndicator = document.getElementById('recordingIndicator');
+
+    // Capture image
+    captureBtn.addEventListener('click', captureImage);
+
+    // Record video
+    recordBtn.addEventListener('click', () => {
+      if (!isRecording) {
+        startRecording(stream);
+        recordBtn.innerHTML = '<i class="bi bi-stop-circle"></i> Stop Recording';
+        recordingIndicator.style.display = 'block';
+      } else {
+        stopRecording();
+        recordBtn.innerHTML = '<i class="bi bi-record-circle"></i> Start Recording';
+        recordingIndicator.style.display = 'none';
+      }
+      isRecording = !isRecording;
+    });
+  }
+
+  // Initialize when page loads
+  document.addEventListener('DOMContentLoaded', () => {
+    initializeVideoSource();
+  });
+
+  // UX Command WebSocket
+  let uxSocket = new WebSocket('ws://192.168.1.108:8765');
+
+  uxSocket.onopen = () => {
+    console.log("open")
+    const statusElem = document.getElementById('ux-status');
+    statusElem.innerHTML = '<i class="bi bi-check-circle-fill"></i> Connected';
+    statusElem.classList.remove('disconnected');
+    statusElem.classList.add('connected');
+  };
+
+  uxSocket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    document.getElementById('last-command').innerHTML = `
+                <p><i class="bi bi-terminal"></i> Last Command:
+                    <span class="telemetry-value">${data.command}</span>
+                    (${new Date(data.timestamp * 1000).toLocaleString()})
+                </p>`;
+
+    // Trigger image capture when receiving the command
+    if (data.command === 'ux_capture_image') {
+      captureImage();
+    }
+  };
+
+  uxSocket.onerror = (error) => {
+    console.error('UX command WebSocket error:', error);
+  };
+
+  uxSocket.onclose = () => {
+    const statusElem = document.getElementById('ux-status');
+    statusElem.innerHTML = '<i class="bi bi-x-circle-fill"></i> Disconnected';
+    statusElem.classList.remove('connected');
+    statusElem.classList.add('disconnected');
+  };
+
+  // Telemetry WebSocket
+  let telemetrySocket = new WebSocket('ws://192.168.1.108:8766');
+
+  telemetrySocket.onopen = () => {
+    const statusElem = document.getElementById('telemetry-status');
+    statusElem.innerHTML = '<i class="bi bi-check-circle-fill"></i> Connected';
+    statusElem.classList.remove('disconnected');
+    statusElem.classList.add('connected');
+  };
+
+  telemetrySocket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    const timestamp = data.timestamp.replace('Z', '');
+    document.getElementById('telemetry-data').innerHTML = `
+                <p><i class="bi bi-clock"></i> Time: <span class="telemetry-value">${new Date(timestamp).toLocaleString()}</span></p>
+                <p><i class="bi bi-arrows-move"></i> Accelerometer:</p>
+                <ul>
+                    <li>X: <span class="telemetry-value">${data.accelerometer.x.toFixed(3)}</span></li>
+                    <li>Y: <span class="telemetry-value">${data.accelerometer.y.toFixed(3)}</span></li>
+                    <li>Z: <span class="telemetry-value">${data.accelerometer.z.toFixed(3)}</span></li>
+                </ul>
+                <p><i class="bi bi-thermometer-half"></i> Temperature: <span class="telemetry-value">${data.temperature.toFixed(1)}°C</span></p>
+                <p><i class="bi bi-battery-half"></i> Battery: <span class="telemetry-value">${data.battery}%</span></p>
+            `;
+  };
+
+  telemetrySocket.onerror = (error) => {
+    console.error('Telemetry WebSocket error:', error);
+  };
+
+  telemetrySocket.onclose = () => {
+    const statusElem = document.getElementById('telemetry-status');
+    statusElem.innerHTML = '<i class="bi bi-x-circle-fill"></i> Disconnected';
+    statusElem.classList.remove('connected');
+    statusElem.classList.add('disconnected');
+  };
+</script>
+</body>
+</html>

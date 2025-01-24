@@ -1,0 +1,12 @@
+{
+    "ux_server": {
+        "host": "localhost",
+        "port": 8765
+    },
+    "telemetry_server": {
+        "host": "localhost",
+        "port": 8766
+    },
+    "input_type": "keyboard",
+    "telemetry_delay_ms": 1000
+}
